@@ -1,8 +1,6 @@
-# filename: train_binary_sfl.py
-
 import torch
 import torch.nn as nn
-import torch.nn.functional as F  # --- [新增] ---
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from transformers import RobertaForSequenceClassification, AutoTokenizer
 from torch.optim import AdamW
@@ -24,18 +22,10 @@ import os
 from dataclasses import dataclass, field, asdict
 from typing import List
 
-# 假设 data_utils.py 在同一目录下
 from data_utils import FT_Dataset
 
-# ============================== 0. Focal Loss 定义 (新增) ==============================
 class FocalLoss(nn.Module):
     def __init__(self, gamma=2.0, alpha=None, reduction='mean'):
-        """
-        Args:
-            gamma (float): 聚焦参数，通常设为 2.0。
-            alpha (list/tensor): 类别权重。例如 [0.7, 0.3] 表示给类别 0 (Normal) 更大的权重。
-            reduction (str): 'mean' 或 'sum'。
-        """
         super(FocalLoss, self).__init__()
         self.gamma = gamma
         self.alpha = alpha
@@ -44,23 +34,13 @@ class FocalLoss(nn.Module):
         self.reduction = reduction
 
     def forward(self, inputs, targets):
-        # inputs: logits [Batch, Num_Classes]
-        # targets: labels [Batch]
-        
-        # 1. 计算标准 CE Loss (保留每个样本的 loss)
         ce_loss = F.cross_entropy(inputs, targets, reduction='none')
-        
-        # 2. 获取预测正确的概率 pt
         pt = torch.exp(-ce_loss)
-        
-        # 3. 计算 Focal Loss
         focal_loss = (1 - pt) ** self.gamma * ce_loss
         
-        # 4. 应用 Alpha 类别权重
         if self.alpha is not None:
             if self.alpha.device != inputs.device:
                 self.alpha = self.alpha.to(inputs.device)
-            # gather: 根据 target 的索引取出对应的 alpha
             alpha_t = self.alpha.gather(0, targets.view(-1))
             focal_loss = alpha_t * focal_loss
             
@@ -71,10 +51,9 @@ class FocalLoss(nn.Module):
         else:
             return focal_loss
 
-# ============================== 1. 配置 (Configuration) ==============================
 @dataclass
 class ExperimentConfig:
-    exp_name: str = "binary_clustered_ga_splitfed_focal" # 修改实验名
+    exp_name: str = "binary_clustered_ga_splitfed_focal"
     rounds: int = 50                
     num_clients: int = 10            
     clients_per_round: int = 4       
@@ -89,28 +68,22 @@ class ExperimentConfig:
     lora_dropout: float = 0.1
     target_modules: List[str] = field(default_factory=lambda: ["query", "value"])
     lr: float = 2e-5
-    model_name: str = "./roberta-base-local" # 请确保本地有此模型
+    model_name: str = "./roberta-base-local"
     seed: int = 42
     aggregation_method: str = "FedDW" 
     num_data_clusters: int = 3
     clustering_interval: int = 5
     
-    # --- [新增] Focal Loss 配置 ---
     use_focal_loss: bool = True
     focal_gamma: float = 2.0
-    # 针对 Normal 召回率低的问题，可以给 Normal (Class 0) 更大权重
-    # 建议尝试: None (自动) 或 [0.65, 0.35] (手动加权 Normal)
     focal_alpha: List[float] = None 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
-# ============================== 2. 数据集工具 ==============================
 class DatasetSplit(Dataset):
     def __init__(self, dataset, idxs): self.dataset, self.idxs = dataset, list(idxs)
     def __len__(self): return len(self.idxs)
     def __getitem__(self, item): return self.dataset[self.idxs[item]]
-
-# ============================== 3. 模型定义 (Split Learning) ==============================
 
 class ClientModel(nn.Module):
     def __init__(self, embeddings, encoder_layers, attention_mask_getter):
@@ -125,7 +98,6 @@ class ClientModel(nn.Module):
         return hidden_states
 
 class ServerModel(nn.Module):
-    # --- [修改] 增加 config 参数 ---
     def __init__(self, encoder_layers, classifier, attention_mask_getter, num_classes: int, config=None):
         super().__init__()
         self.encoder_layers = encoder_layers
@@ -133,7 +105,6 @@ class ServerModel(nn.Module):
         self.get_extended_attention_mask = attention_mask_getter
         self.num_classes = num_classes
         
-        # --- [修改] 初始化损失函数 ---
         if config and hasattr(config, 'use_focal_loss') and config.use_focal_loss:
             self.loss_fct = FocalLoss(gamma=config.focal_gamma, alpha=config.focal_alpha)
         else:
@@ -146,17 +117,14 @@ class ServerModel(nn.Module):
         
         loss = None
         if labels is not None:
-            # --- [修改] 使用初始化好的 loss_fct ---
             loss = self.loss_fct(logits.view(-1, self.num_classes), labels.view(-1))
             
         return logits, loss
 
-# --- 通信量计算工具 ---
 def get_tensor_size_mb(tensor: torch.Tensor):
     if not isinstance(tensor, torch.Tensor): return 0
     return tensor.numel() * tensor.element_size() / (1024 * 1024)
 
-# ============================== 4. 训练器类 (SFLTrainer) ==============================
 class SFLTrainer:
     def __init__(self, config: ExperimentConfig):
         self.config = config
@@ -170,7 +138,7 @@ class SFLTrainer:
                 ignore_mismatched_sizes=True
             )
         except OSError:
-            logging.error(f"无法加载模型: {config.model_name}")
+            logging.error(f"Unable to load model: {config.model_name}")
             raise
 
         peft_config_full = LoraConfig(
@@ -225,17 +193,14 @@ class SFLTrainer:
                 batch = {k: v.to(self.device) for k, v in batch.items()}
                 optimizer.zero_grad()
                 
-                # Client Forward
                 fx = local_net(batch['input_ids'], batch['attention_mask'], self.device)
                 comm_stats['uplink_sfl'] += get_tensor_size_mb(fx)
                 
-                # Server Forward
                 client_fx = fx.clone().detach().requires_grad_(True)
                 _, loss = server_model_for_client(client_fx, batch['attention_mask'], self.device, batch['labels'])
                 
                 loss.backward()
                 
-                # Gradient Return (Downlink)
                 if client_fx.grad is not None:
                     comm_stats['downlink_sfl'] += get_tensor_size_mb(client_fx.grad)
                     fx.backward(client_fx.grad)
@@ -251,7 +216,6 @@ class SFLTrainer:
         
         client_net = ClientModel(base_model.embeddings, nn.ModuleList(base_model.encoder.layer[:split_layer_for_eval]), self.net_glob_full.get_extended_attention_mask).to(self.device).eval()
         
-        # --- [修改] 传入 config ---
         server_net = ServerModel(
             nn.ModuleList(base_model.encoder.layer[split_layer_for_eval:]), 
             self.net_glob_full.classifier, 
@@ -275,11 +239,11 @@ class SFLTrainer:
         report_str = classification_report(all_labels, all_preds, target_names=target_names, zero_division=0)
         mcc = matthews_corrcoef(all_labels, all_preds)
         
-        logging.info(f"\n分类评估报告 (Binary - FocalLoss={self.config.use_focal_loss}):\n{report_str}")
+        logging.info(f"\nClassification Evaluation Report (Binary - FocalLoss={self.config.use_focal_loss}):\n{report_str}")
         return {'eval_loss': total_eval_loss / len(test_loader) if len(test_loader) > 0 else 0, 'mcc': mcc, 'report': report_dict }
 
     def _extract_lora_weights_vector(self, model_state_dict):
-        lora_params = {k: v for k, v in model_state_dict.items() if ('lora_A' in k or 'lora_B' in k or 'classifier' in k) and 'original_module' not in k}
+        lora_params = {k: v for k, v in model_state_dict.items() if ('lora_A' in k or'lora_B' in k or'classifier' in k) and'original_module' not in k}
         if not lora_params: return None
         return torch.cat([lora_params[k].view(-1) for k in sorted(lora_params.keys())]).cpu().numpy()
 
@@ -300,7 +264,7 @@ class SFLTrainer:
         train_loaders = [DataLoader(DatasetSplit(dataset_train, list(idxs)), self.config.batch_size, shuffle=True) for idxs in dict_users_indices]
         test_loader_global = DataLoader(dataset_test, self.config.batch_size, shuffle=False)
         
-        logging.info(f"开始二分类 SFL 训练, 总轮数: {self.config.rounds}, 损失函数: {'FocalLoss' if self.config.use_focal_loss else 'CrossEntropy'}")
+        logging.info(f"Starting Binary SFL training, Total rounds: {self.config.rounds}, Loss function: {'FocalLoss' if self.config.use_focal_loss else'CrossEntropy'}")
         self.data_cluster_labels = [0] * self.config.num_clients
         
         for round_num in range(1, self.config.rounds + 1):
@@ -319,7 +283,6 @@ class SFLTrainer:
                 
                 local_net = ClientModel(roberta.embeddings, nn.ModuleList(roberta.encoder.layer[:split_layer]), local_model.get_extended_attention_mask).to(self.device)
                 
-                # --- [修改] 传入 config ---
                 server_net = ServerModel(
                     nn.ModuleList(roberta.encoder.layer[split_layer:]), 
                     local_model.classifier, 
@@ -368,34 +331,32 @@ class SFLTrainer:
                     report.get('Attack', {}).get('precision'), report.get('Attack', {}).get('recall'), report.get('Attack', {}).get('f1-score')
                 ]
                 writer.writerow(row)
-        logging.info(f"结果已保存: {os.path.join(output_dir, filename)}")
+        logging.info(f"Results saved to: {os.path.join(output_dir, filename)}")
 
-# ============================== 5. 主函数 ==============================
 def main():
     config = ExperimentConfig()
     
-    # 请确保以下路径指向您生成的二分类 jsonl 文件
     train_data_path = 'processed_data_binary/train_data.jsonl'
     test_data_path = 'processed_data_binary/test_data.jsonl'
 
     if not all(os.path.exists(f) for f in [train_data_path, test_data_path]):
-        logging.error(f"错误：找不到数据文件。请先运行数据处理脚本生成 'processed_data_binary' 目录。")
+        logging.error(f"Error: Data files not found. Please run the data processing script to generate the'processed_data_binary' directory first.")
         return
 
     try:
         tokenizer = AutoTokenizer.from_pretrained(config.model_name)
     except OSError:
-        logging.error(f"错误：无法从本地路径加载分词器: {config.model_name}")
+        logging.error(f"Error: Unable to load tokenizer from local path: {config.model_name}")
         return
 
-    logging.info("加载二分类数据集...")
+    logging.info("Loading binary classification dataset...")
     dataset_train = FT_Dataset(train_data_path, config.batch_size, config.max_seq_length, tokenizer)
     dataset_test = FT_Dataset(test_data_path, config.batch_size, config.max_seq_length, tokenizer)
         
     trainer = SFLTrainer(config)
     trainer.run(dataset_train, dataset_test)
     trainer.save_results()
-    logging.info("\n二分类 SFL 训练完成!")
+    logging.info("\nBinary SFL training completed!")
 
 if __name__ == "__main__":
     main()
