@@ -1,5 +1,3 @@
-# train_multiclass_sfl_final_fixed_smote.py
-
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
@@ -26,10 +24,8 @@ from typing import List, Dict, Tuple
 
 from data_utils import FT_Dataset
 
-
 @dataclass
 class ExperimentConfig:
-    # --- [推荐修改] ---
     exp_name: str = "multiclass_clustered_ga_splitfed_smote"
     rounds: int = 100
     num_clients: int = 10 
@@ -53,7 +49,6 @@ class ExperimentConfig:
     ga_mutation_rate: float = 0.1
     
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-
 
 class DatasetSplit(Dataset):
     def __init__(self, dataset, idxs): self.dataset, self.idxs = dataset, list(idxs)
@@ -87,12 +82,10 @@ class ServerModel(nn.Module):
         
         loss = None
         if labels is not None:
-       
             loss_fct = nn.CrossEntropyLoss() 
             loss = loss_fct(logits.view(-1, self.num_classes), labels.view(-1))
             
         return logits, loss
-        
 
 def get_tensor_size_mb(tensor: torch.Tensor):
     if not isinstance(tensor, torch.Tensor): return 0
@@ -105,10 +98,8 @@ def get_trainable_params_size_mb(model: nn.Module):
             total_size += param.numel() * param.element_size()
     return total_size / (1024 * 1024)
 
-
 class SFLTrainer:
     def __init__(self, config: ExperimentConfig):
-      
         self.config = config
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.set_seed(config.seed)
@@ -120,7 +111,7 @@ class SFLTrainer:
                 ignore_mismatched_sizes=True
             )
         except OSError:
-            logging.error(f"Error: Unable to retrieve from local path '{config.model_name}' 加载模型。")
+            logging.error(f"Error: Unable to load model from local path '{config.model_name}'.")
             raise
 
         peft_config_full = LoraConfig(task_type=TaskType.SEQ_CLS, r=config.lora_r, lora_alpha=config.lora_alpha, lora_dropout=config.lora_dropout, target_modules=config.target_modules, modules_to_save=["classifier"], bias="none")
@@ -138,13 +129,12 @@ class SFLTrainer:
         self.client_data_sizes = []
         self.clustered_clients_by_resource = {}
         
-        logging.info(f"Use equipment: {self.device}, Experimental configuration: {asdict(config)}")
+        logging.info(f"Using device: {self.device}, Experiment config: {asdict(config)}")
 
     def set_seed(self, seed):
         random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
         if torch.cuda.is_available(): torch.cuda.manual_seed_all(seed)
 
-   
     def aggregate(self, w_locals, client_weights=None):
         if not w_locals: return
         
@@ -205,17 +195,17 @@ class SFLTrainer:
         return {'eval_loss': total_eval_loss / len(test_loader) if len(test_loader) > 0 else 0, 'mcc': mcc, 'report': report_dict }
 
     def _extract_lora_weights_vector(self, model_state_dict):
-        lora_params = {k: v for k, v in model_state_dict.items() if ('lora_A' in k or 'lora_B' in k or 'classifier' in k) and 'original_module' not in k}
+        lora_params = {k: v for k, v in model_state_dict.items() if ('lora_A' in k or'lora_B' in k or'classifier' in k) and'original_module' not in k}
         if not lora_params: return None
         return torch.cat([lora_params[k].view(-1) for k in sorted(lora_params.keys())]).cpu().numpy()
 
     def perform_double_clustering(self):
-        logging.info("Implement a dual clustering strategy...")
+        logging.info("Implementing a dual clustering strategy...")
         client_features, available_clients = [], []
         for i, weight in enumerate(self.client_lora_weights):
             if weight is not None: client_features.append(weight); available_clients.append(i)
         if len(available_clients) < self.config.num_data_clusters:
-            logging.warning(f"Number of available clients({len(available_clients)})Insufficient for clustering, skip.")
+            logging.warning(f"Number of available clients ({len(available_clients)}) insufficient for clustering, skipping.")
             self.data_cluster_labels = [0] * self.config.num_clients
             return
         kmeans = KMeans(n_clusters=self.config.num_data_clusters, random_state=self.config.seed, n_init='auto').fit(np.array(client_features))
@@ -229,7 +219,7 @@ class SFLTrainer:
     def genetic_algorithm_client_selection(self, candidates: List[int], num_to_select: int) -> List[int]:
         if not candidates or num_to_select <= 0: return []
         if len(candidates) <= num_to_select:
-            logging.info(f"GA: Number of candidates ({len(candidates)}) Less than or equal to the number of selections ({num_to_select})，Return all candidates directly: {candidates}")
+            logging.info(f"GA: Number of candidates ({len(candidates)}) is less than or equal to selection count ({num_to_select}). Returning all candidates: {candidates}")
             return candidates
         num_to_select = min(num_to_select, len(candidates))
         def fitness(individual):
@@ -271,7 +261,6 @@ class SFLTrainer:
         return sorted(final_selection)
         
     def run(self, dataset_train, dataset_test):
-      
         dict_users_indices = np.array_split(range(len(dataset_train)), self.config.num_clients)
         self.client_data_sizes = [len(idxs) for idxs in dict_users_indices]
         train_loaders = [DataLoader(DatasetSplit(dataset_train, list(idxs)), self.config.batch_size, shuffle=True) for idxs in dict_users_indices]
@@ -288,7 +277,7 @@ class SFLTrainer:
                 if cid != -1: clients_by_cluster[cid].append(i)
             active_clusters = [cid for cid, clist in clients_by_cluster.items() if clist]
             if not active_clusters:
-                logging.warning("No data clusters available, skip this round."); continue
+                logging.warning("No data clusters available, skipping this round."); continue
             selected_clients = []
             num_per_cluster = max(1, self.config.clients_per_round // len(active_clusters))
             for cid in active_clusters:
@@ -303,8 +292,8 @@ class SFLTrainer:
                 potential_adds = list(set(all_possible) - set(selected_clients))
                 selected_clients.extend(random.sample(potential_adds, min(len(potential_adds), needed)))
             if not selected_clients:
-                logging.warning("If no client is selected, skip this round."); continue
-            logging.info(f"The client ultimately selected in this round: {selected_clients}")
+                logging.warning("No clients selected, skipping this round."); continue
+            logging.info(f"Clients selected for this round: {selected_clients}")
             w_locals, local_losses, round_comm_stats = [], [], {'total_uplink_mb': 0, 'total_downlink_mb': 0}
             for idx in selected_clients:
                 split_layer = self.client_resource_profiles[self.client_profiles[idx]]['split_layer']
@@ -326,16 +315,16 @@ class SFLTrainer:
             metrics = self.evaluate(test_loader_global)
             round_duration = time.time() - round_start_time
             self.history.append({'round': round_num, 'avg_train_loss': np.mean(local_losses) if local_losses else 0, 'round_duration_sec': round_duration, **round_comm_stats, **metrics})
-            logging.info(f"--- Round {round_num} Summarize ---")
+            logging.info(f"--- Round {round_num} Summary ---")
             logging.info(f"  Global model evaluation - Accuracy: {metrics['report']['accuracy']:.4f}, F1 (Weighted): {metrics['report']['weighted avg']['f1-score']:.4f}, MCC: {metrics['mcc']:.4f}")
-            logging.info(f"  This round takes time: {round_duration:.2f} 秒")
+            logging.info(f"  Round duration: {round_duration:.2f} seconds")
 
     def save_results(self, output_dir="results_multiclass_sfl_smote"): 
         os.makedirs(output_dir, exist_ok=True)
         filename = f"{self.config.exp_name}_{time.strftime('%Y%m%d_%H%M%S')}.csv"
         
         if not self.history:
-            logging.warning("The history is empty, so the result cannot be saved.")
+            logging.warning("History is empty, results cannot be saved.")
             return
 
         with open(os.path.join(output_dir, filename), 'w', newline='', encoding='utf-8') as f:
@@ -361,7 +350,7 @@ class SFLTrainer:
                     class_metrics = report.get(f'Class {i}', {})
                     row.extend([class_metrics.get('precision'), class_metrics.get('recall'), class_metrics.get('f1-score'), class_metrics.get('support')])
                 writer.writerow(row)
-        logging.info(f"Detailed evaluation results have been saved to: {os.path.join(output_dir, filename)}")
+        logging.info(f"Detailed evaluation results saved to: {os.path.join(output_dir, filename)}")
 
 def main():
     config = ExperimentConfig()
@@ -370,7 +359,7 @@ def main():
     test_data_path = 'processed_data_SMOTE/test_data.jsonl'
 
     if not all(os.path.exists(f) for f in [train_data_path, test_data_path]):
-        logging.error(f"Error: Data file processed by SMOTE not found. '{train_data_path}' 或 '{test_data_path}'。")
+        logging.error(f"Error: SMOTE processed data files not found: '{train_data_path}' or '{test_data_path}'.")
         logging.error("Please run the script `UNSW_NB15_..._processed_llm.py`, which contains SMOTE processing, first.")
         return
 
