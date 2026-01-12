@@ -1,8 +1,6 @@
-# filename: train_multiclass_sfl_final_fixed.py
-
 import torch
 import torch.nn as nn
-import torch.nn.functional as F # --- [新增] ---
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from transformers import RobertaForSequenceClassification, AutoTokenizer
 from torch.optim import AdamW
@@ -25,18 +23,10 @@ import os
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Tuple
 
-# 假设您的数据工具文件名为 data_utils.py
 from data_utils import FT_Dataset
 
-# ============================== 0. Focal Loss 定义 (新增) ==============================
 class FocalLoss(nn.Module):
     def __init__(self, gamma=2.0, alpha=None, reduction='mean'):
-        """
-        Args:
-            gamma (float): 聚焦参数，通常设为 2.0。
-            alpha (list/tensor): 类别权重。对于多分类，这应该是一个长度等于 num_classes 的列表。
-            reduction (str): 'mean' 或 'sum'。
-        """
         super(FocalLoss, self).__init__()
         self.gamma = gamma
         self.alpha = alpha
@@ -45,23 +35,13 @@ class FocalLoss(nn.Module):
         self.reduction = reduction
 
     def forward(self, inputs, targets):
-        # inputs: logits [Batch, Num_Classes]
-        # targets: labels [Batch]
-        
-        # 1. 计算标准 CE Loss (保留每个样本的 loss)
         ce_loss = F.cross_entropy(inputs, targets, reduction='none')
-        
-        # 2. 获取预测正确的概率 pt
         pt = torch.exp(-ce_loss)
-        
-        # 3. 计算 Focal Loss
         focal_loss = (1 - pt) ** self.gamma * ce_loss
         
-        # 4. 应用 Alpha 类别权重
         if self.alpha is not None:
             if self.alpha.device != inputs.device:
                 self.alpha = self.alpha.to(inputs.device)
-            # gather: 根据 target 的索引取出对应的 alpha
             alpha_t = self.alpha.gather(0, targets.view(-1))
             focal_loss = alpha_t * focal_loss
             
@@ -72,10 +52,9 @@ class FocalLoss(nn.Module):
         else:
             return focal_loss
 
-# ============================== 1. 配置和日志 ==============================
 @dataclass
 class ExperimentConfig:
-    exp_name: str = "multiclass_clustered_ga_splitfed_focal" # 修改实验名
+    exp_name: str = "multiclass_clustered_ga_splitfed_focal"
     rounds: int = 50
     num_clients: int = 10 
     clients_per_round: int = 4
@@ -98,24 +77,19 @@ class ExperimentConfig:
     ga_generations: int = 10
     ga_mutation_rate: float = 0.1
     
-    # --- [新增] Focal Loss 配置 ---
     use_focal_loss: bool = True
     focal_gamma: float = 2.0
-    # 这里我们将您之前硬编码在代码里的权重移到配置中
-    # 对应 UNSW-NB15 的 10 个类别，给小样本类别更高的权重
     focal_alpha: List[float] = field(default_factory=lambda: [
         1.0, 5.0, 5.0, 1.5, 1.0, 1.5, 1.0, 1.5, 8.0, 10.0
     ])
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
-# ============================== 2. 数据工具 (DatasetSplit) ==============================
 class DatasetSplit(Dataset):
     def __init__(self, dataset, idxs): self.dataset, self.idxs = dataset, list(idxs)
     def __len__(self): return len(self.idxs)
     def __getitem__(self, item): return self.dataset[self.idxs[item]]
 
-# ============================== 3. 模型定义 (Client/Server) ==============================
 class ClientModel(nn.Module):
     def __init__(self, embeddings, encoder_layers, attention_mask_getter):
         super().__init__()
@@ -129,7 +103,6 @@ class ClientModel(nn.Module):
         return hidden_states
 
 class ServerModel(nn.Module):
-    # --- [修改] 增加 config 参数 ---
     def __init__(self, encoder_layers, classifier, attention_mask_getter, num_classes: int, config=None):
         super().__init__()
         self.encoder_layers = encoder_layers
@@ -137,12 +110,9 @@ class ServerModel(nn.Module):
         self.get_extended_attention_mask = attention_mask_getter
         self.num_classes = num_classes
 
-        # --- [修改] 初始化损失函数 ---
-        # 优先使用配置中的 Focal Loss
         if config and hasattr(config, 'use_focal_loss') and config.use_focal_loss:
             self.loss_fct = FocalLoss(gamma=config.focal_gamma, alpha=config.focal_alpha)
         else:
-            # 兼容：如果没开 Focal Loss，也尝试使用 config 中的 alpha 作为 CrossEntropy 的权重
             weights = torch.tensor(config.focal_alpha) if (config and config.focal_alpha) else None
             self.loss_fct = nn.CrossEntropyLoss(weight=weights)
 
@@ -153,12 +123,10 @@ class ServerModel(nn.Module):
         
         loss = None
         if labels is not None:
-            # --- [修改] 使用初始化好的 loss_fct，不再硬编码 ---
             loss = self.loss_fct(logits.view(-1, self.num_classes), labels.view(-1))
             
         return logits, loss
         
-# --- 通信量计算工具 ---
 def get_tensor_size_mb(tensor: torch.Tensor):
     if not isinstance(tensor, torch.Tensor): return 0
     return tensor.numel() * tensor.element_size() / (1024 * 1024)
@@ -170,7 +138,6 @@ def get_trainable_params_size_mb(model: nn.Module):
             total_size += param.numel() * param.element_size()
     return total_size / (1024 * 1024)
 
-# ============================== 4. 训练器类 ==============================
 class SFLTrainer:
     def __init__(self, config: ExperimentConfig):
         self.config = config
@@ -184,7 +151,7 @@ class SFLTrainer:
                 ignore_mismatched_sizes=True
             )
         except OSError:
-            logging.error(f"错误：无法从本地路径 '{config.model_name}' 加载模型。")
+            logging.error(f"Error: Unable to load model from local path '{config.model_name}'.")
             raise
 
         peft_config_full = LoraConfig(task_type=TaskType.SEQ_CLS, r=config.lora_r, lora_alpha=config.lora_alpha, lora_dropout=config.lora_dropout, target_modules=config.target_modules, modules_to_save=["classifier"], bias="none")
@@ -203,7 +170,7 @@ class SFLTrainer:
         self.clustered_clients_by_resource = {}
         
         loss_name = "Focal Loss" if config.use_focal_loss else "Cross Entropy"
-        logging.info(f"使用设备: {self.device}, 损失函数: {loss_name}, 实验配置: {asdict(config)}")
+        logging.info(f"Using device: {self.device}, Loss Function: {loss_name}, Experiment Config: {asdict(config)}")
 
     def set_seed(self, seed):
         random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
@@ -259,7 +226,6 @@ class SFLTrainer:
         full_roberta_model = self.net_glob_full.base_model.model.roberta
         client_net = ClientModel(full_roberta_model.embeddings, nn.ModuleList(full_roberta_model.encoder.layer[:split_layer_for_eval]), self.net_glob_full.get_extended_attention_mask).to(self.device).eval()
         
-        # --- [修改] 传入 config ---
         server_net = ServerModel(
             nn.ModuleList(full_roberta_model.encoder.layer[split_layer_for_eval:]), 
             self.net_glob_full.classifier, 
@@ -281,7 +247,7 @@ class SFLTrainer:
         report_dict = classification_report(all_labels, all_preds, target_names=[f'Class {i}' for i in range(self.config.num_classes)], zero_division=0, output_dict=True)
         mcc = matthews_corrcoef(all_labels, all_preds)
         
-        logging.info(f"\n分类评估报告:\n{classification_report(all_labels, all_preds, target_names=[f'Class {i}' for i in range(self.config.num_classes)], zero_division=0)}")
+        logging.info(f"\nClassification Evaluation Report:\n{classification_report(all_labels, all_preds, target_names=[f'Class {i}' for i in range(self.config.num_classes)], zero_division=0)}")
         
         return {
             'eval_loss': total_eval_loss / len(test_loader) if len(test_loader) > 0 else 0,
@@ -290,19 +256,19 @@ class SFLTrainer:
         }
 
     def _extract_lora_weights_vector(self, model_state_dict):
-        lora_params = {k: v for k, v in model_state_dict.items() if ('lora_A' in k or 'lora_B' in k or 'classifier' in k) and 'original_module' not in k}
+        lora_params = {k: v for k, v in model_state_dict.items() if ('lora_A' in k or'lora_B' in k or'classifier' in k) and'original_module' not in k}
         if not lora_params: return None
         return torch.cat([lora_params[k].view(-1) for k in sorted(lora_params.keys())]).cpu().numpy()
 
     def perform_double_clustering(self):
-        logging.info("执行双重聚类策略...")
+        logging.info("Implementing dual clustering strategy...")
         client_features, available_clients = [], []
         for i, weight in enumerate(self.client_lora_weights):
             if weight is not None:
                 client_features.append(weight); available_clients.append(i)
         
         if len(available_clients) < self.config.num_data_clusters:
-            logging.warning(f"可用客户端数量({len(available_clients)})不足以聚类，跳过。")
+            logging.warning(f"Number of available clients ({len(available_clients)}) is insufficient for clustering, skipping.")
             self.data_cluster_labels = [0] * self.config.num_clients
             return
 
@@ -310,20 +276,20 @@ class SFLTrainer:
         for i, client_idx in enumerate(available_clients):
             self.data_cluster_labels[client_idx] = kmeans.labels_[i]
         
-        logging.info(f"数据聚类结果: {list(zip(available_clients, kmeans.labels_))}")
+        logging.info(f"Data clustering results: {list(zip(available_clients, kmeans.labels_))}")
         
         self.clustered_clients_by_resource = {c_id: {res: [] for res in self.client_resource_profiles} for c_id in range(self.config.num_data_clusters)}
         for i in range(self.config.num_clients):
             if self.data_cluster_labels[i] != -1:
                 self.clustered_clients_by_resource[self.data_cluster_labels[i]][self.client_profiles[i]].append(i)
         
-        logging.info("内部资源分组完成。")
+        logging.info("Internal resource grouping completed.")
 
     def genetic_algorithm_client_selection(self, candidates: List[int], num_to_select: int) -> List[int]:
         if not candidates or num_to_select <= 0:
             return []
         if len(candidates) <= num_to_select:
-            logging.info(f"GA: 候选人数量 ({len(candidates)}) 不足或等于选择数量 ({num_to_select})，直接返回所有候选人: {candidates}")
+            logging.info(f"GA: Number of candidates ({len(candidates)}) is less than or equal to selection count ({num_to_select}), returning all candidates: {candidates}")
             return candidates
         
         num_to_select = min(num_to_select, len(candidates))
@@ -382,7 +348,7 @@ class SFLTrainer:
         train_loaders = [DataLoader(DatasetSplit(dataset_train, list(idxs)), self.config.batch_size, shuffle=True) for idxs in dict_users_indices]
         test_loader_global = DataLoader(dataset_test, self.config.batch_size, shuffle=False)
         
-        logging.info(f"开始训练 {self.config.rounds} 轮...")
+        logging.info(f"Start training {self.config.rounds} rounds...")
         self.data_cluster_labels = [0] * self.config.num_clients
         self.perform_double_clustering()
 
@@ -399,7 +365,7 @@ class SFLTrainer:
             
             active_clusters = [cid for cid, clist in clients_by_cluster.items() if clist]
             if not active_clusters:
-                logging.warning("无可用数据簇，跳过本轮。"); continue
+                logging.warning("No available data clusters, skipping this round."); continue
 
             selected_clients = []
             num_per_cluster = max(1, self.config.clients_per_round // len(active_clusters))
@@ -411,15 +377,14 @@ class SFLTrainer:
             
             selected_clients = sorted(list(set(selected_clients)))
             if len(selected_clients) < self.config.clients_per_round:
-                # --- [核心修复] ---
                 all_possible = [c for clist in clients_by_cluster.values() for c in clist]
                 needed = self.config.clients_per_round - len(selected_clients)
                 potential_adds = list(set(all_possible) - set(selected_clients))
                 selected_clients.extend(random.sample(potential_adds, min(len(potential_adds), needed)))
 
             if not selected_clients:
-                logging.warning("无客户端被选中，跳过本轮。"); continue
-            logging.info(f"本轮最终选中客户端: {selected_clients}")
+                logging.warning("No clients selected, skipping this round."); continue
+            logging.info(f"Clients selected for this round: {selected_clients}")
 
             w_locals, local_losses, round_comm_stats = [], [], {'total_uplink_mb': 0, 'total_downlink_mb': 0}
             for idx in selected_clients:
@@ -428,7 +393,6 @@ class SFLTrainer:
                 roberta = local_model.base_model.model.roberta
                 local_net = ClientModel(roberta.embeddings, nn.ModuleList(roberta.encoder.layer[:split_layer]), local_model.get_extended_attention_mask).to(self.device)
                 
-                # --- [修改] 传入 config ---
                 server_net = ServerModel(
                     nn.ModuleList(roberta.encoder.layer[split_layer:]), 
                     local_model.classifier, 
@@ -463,16 +427,17 @@ class SFLTrainer:
                 **metrics
             })
             
-            logging.info(f"--- Round {round_num} 总结 ---")
-            logging.info(f"  全局模型评估 - Accuracy: {metrics['report']['accuracy']:.4f}, F1 (Weighted): {metrics['report']['weighted avg']['f1-score']:.4f}, MCC: {metrics['mcc']:.4f}")
-            logging.info(f"  本轮耗时: {round_duration:.2f} 秒")
+            logging.info(f"--- Round {round_num} Summary ---")
+            logging.info(f"  Global model evaluation - Accuracy: {metrics['report']['accuracy']:.4f}, F1
+            logging.info(f"  Global model evaluation - Accuracy: {metrics['report']['accuracy']:.4f}, F1 (Weighted): {metrics['report']['weighted avg']['f1-score']:.4f}, MCC: {metrics['mcc']:.4f}")
+            logging.info(f"  Round duration: {round_duration:.2f} seconds")
 
     def save_results(self, output_dir="results_multiclass_sfl_advanced"):
         os.makedirs(output_dir, exist_ok=True)
         filename = f"{self.config.exp_name}_{time.strftime('%Y%m%d_%H%M%S')}.csv"
         
         if not self.history:
-            logging.warning("历史记录为空，无法保存结果。")
+            logging.warning("History is empty, results cannot be saved.")
             return
 
         with open(os.path.join(output_dir, filename), 'w', newline='', encoding='utf-8') as f:
@@ -523,21 +488,19 @@ class SFLTrainer:
                 
                 writer.writerow(row)
 
-        logging.info(f"详细评估结果已保存到: {os.path.join(output_dir, filename)}")
+        logging.info(f"Detailed evaluation results saved to: {os.path.join(output_dir, filename)}")
 
-# ============================== 5. 主函数 ==============================
 def main():
     config = ExperimentConfig()
     
-    # 确保此处数据路径正确
     if not all(os.path.exists(f) for f in ['processed_data/train_data.jsonl', 'processed_data/test_data.jsonl']):
-        logging.error("错误：找不到数据文件。请先运行 `UNSW_NB15_processed_llm.py`。")
+        logging.error("Error: Data files not found. Please run `UNSW_NB15_processed_llm.py` first.")
         return
 
     try:
         tokenizer = AutoTokenizer.from_pretrained(config.model_name)
     except OSError:
-        logging.error(f"错误：无法从本地路径 '{config.model_name}' 加载分词器。")
+        logging.error(f"Error: Unable to load tokenizer from local path '{config.model_name}'.")
         return
 
     dataset_train = FT_Dataset('processed_data/train_data.jsonl', config.batch_size, config.max_seq_length, tokenizer)
@@ -546,7 +509,7 @@ def main():
     trainer = SFLTrainer(config)
     trainer.run(dataset_train, dataset_test)
     trainer.save_results()
-    logging.info("\n实验完成!")
+    logging.info("\nExperiment completed!")
 
 if __name__ == "__main__":
     main()
